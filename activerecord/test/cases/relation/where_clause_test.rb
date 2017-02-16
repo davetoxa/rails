@@ -47,15 +47,15 @@ class ActiveRecord::Relation
     test "merge removes bind parameters matching overlapping equality clauses" do
       a = WhereClause.new(
         [table["id"].eq(bind_param), table["name"].eq(bind_param)],
-        [[column("id"), 1], [column("name"), "Sean"]],
+        [attribute("id", 1), attribute("name", "Sean")],
       )
       b = WhereClause.new(
         [table["name"].eq(bind_param)],
-        [[column("name"), "Jim"]]
+        [attribute("name", "Jim")]
       )
       expected = WhereClause.new(
         [table["id"].eq(bind_param), table["name"].eq(bind_param)],
-        [[column("id"), 1], [column("name"), "Jim"]],
+        [attribute("id", 1), attribute("name", "Jim")],
       )
 
       assert_equal expected, a.merge(b)
@@ -103,26 +103,80 @@ class ActiveRecord::Relation
         table["name"].eq(bind_param),
         table["age"].gteq(bind_param),
       ], [
-        [column("name"), "Sean"],
-        [column("age"), 30],
+        attribute("name", "Sean"),
+        attribute("age", 30),
       ])
-      expected = WhereClause.new([table["age"].gteq(bind_param)], [[column("age"), 30]])
+      expected = WhereClause.new([table["age"].gteq(bind_param)], [attribute("age", 30)])
 
       assert_equal expected, where_clause.except("id", "name")
     end
 
+    test "ast groups its predicates with AND" do
+      predicates = [
+        table["id"].in([1, 2, 3]),
+        table["name"].eq(bind_param),
+      ]
+      where_clause = WhereClause.new(predicates, [])
+      expected = Arel::Nodes::And.new(predicates)
+
+      assert_equal expected, where_clause.ast
+    end
+
+    test "ast wraps any SQL literals in parenthesis" do
+      random_object = Object.new
+      where_clause = WhereClause.new([
+        table["id"].in([1, 2, 3]),
+        "foo = bar",
+        random_object,
+      ], [])
+      expected = Arel::Nodes::And.new([
+        table["id"].in([1, 2, 3]),
+        Arel::Nodes::Grouping.new(Arel.sql("foo = bar")),
+        Arel::Nodes::Grouping.new(random_object),
+      ])
+
+      assert_equal expected, where_clause.ast
+    end
+
+    test "ast removes any empty strings" do
+      where_clause = WhereClause.new([table["id"].in([1, 2, 3])], [])
+      where_clause_with_empty = WhereClause.new([table["id"].in([1, 2, 3]), ""], [])
+
+      assert_equal where_clause.ast, where_clause_with_empty.ast
+    end
+
+    test "or joins the two clauses using OR" do
+      where_clause = WhereClause.new([table["id"].eq(bind_param)], [attribute("id", 1)])
+      other_clause = WhereClause.new([table["name"].eq(bind_param)], [attribute("name", "Sean")])
+      expected_ast =
+        Arel::Nodes::Grouping.new(
+          Arel::Nodes::Or.new(table["id"].eq(bind_param), table["name"].eq(bind_param))
+        )
+      expected_binds = where_clause.binds + other_clause.binds
+
+      assert_equal expected_ast.to_sql, where_clause.or(other_clause).ast.to_sql
+      assert_equal expected_binds, where_clause.or(other_clause).binds
+    end
+
+    test "or returns an empty where clause when either side is empty" do
+      where_clause = WhereClause.new([table["id"].eq(bind_param)], [attribute("id", 1)])
+
+      assert_equal WhereClause.empty, where_clause.or(WhereClause.empty)
+      assert_equal WhereClause.empty, WhereClause.empty.or(where_clause)
+    end
+
     private
 
-    def table
-      Arel::Table.new("table")
-    end
+      def table
+        Arel::Table.new("table")
+      end
 
-    def bind_param
-      Arel::Nodes::BindParam.new
-    end
+      def bind_param
+        Arel::Nodes::BindParam.new
+      end
 
-    def column(name)
-      ActiveRecord::ConnectionAdapters::Column.new(name, nil, nil)
-    end
+      def attribute(name, value)
+        ActiveRecord::Attribute.with_cast_value(name, value, ActiveRecord::Type::Value.new)
+      end
   end
 end

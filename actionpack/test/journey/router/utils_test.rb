@@ -1,5 +1,4 @@
-# coding: utf-8
-require 'abstract_unit'
+require "abstract_unit"
 
 module ActionDispatch
   module Journey

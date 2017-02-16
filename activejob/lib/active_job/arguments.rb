@@ -1,30 +1,29 @@
-require 'active_support/core_ext/hash/indifferent_access'
+require "active_support/core_ext/hash"
 
 module ActiveJob
   # Raised when an exception is raised during job arguments deserialization.
   #
-  # Wraps the original exception raised as +original_exception+.
+  # Wraps the original exception raised as +cause+.
   class DeserializationError < StandardError
-    attr_reader :original_exception
-
-    def initialize(e) #:nodoc:
-      super("Error while trying to deserialize arguments: #{e.message}")
-      @original_exception = e
-      set_backtrace e.backtrace
+    def initialize #:nodoc:
+      super("Error while trying to deserialize arguments: #{$!.message}")
+      set_backtrace $!.backtrace
     end
   end
 
-  # Raised when an unsupported argument type is being set as job argument. We
-  # currently support NilClass, Fixnum, Float, String, TrueClass, FalseClass,
-  # Bignum and object that can be represented as GlobalIDs (ex: Active Record).
-  # Also raised if you set the key for a Hash something else than a string or
-  # a symbol.
-  class SerializationError < ArgumentError
-  end
+  # Raised when an unsupported argument type is set as a job argument. We
+  # currently support NilClass, Integer, Fixnum, Float, String, TrueClass, FalseClass,
+  # Bignum, BigDecimal, and objects that can be represented as GlobalIDs (ex: Active Record).
+  # Raised if you set the key for a Hash something else than a string or
+  # a symbol. Also raised when trying to serialize an object which can't be
+  # identified with a Global ID - such as an unpersisted Active Record model.
+  class SerializationError < ArgumentError; end
 
   module Arguments
     extend self
-    TYPE_WHITELIST = [ NilClass, Fixnum, Float, String, TrueClass, FalseClass, Bignum ]
+    # :nodoc:
+    TYPE_WHITELIST = [ NilClass, String, Integer, Float, BigDecimal, TrueClass, FalseClass ]
+    TYPE_WHITELIST.push(Fixnum, Bignum) unless 1.class == Integer
 
     # Serializes a set of arguments. Whitelisted types are returned
     # as-is. Arrays/Hashes are serialized element by element.
@@ -38,26 +37,36 @@ module ActiveJob
     # All other types are deserialized using GlobalID.
     def deserialize(arguments)
       arguments.map { |argument| deserialize_argument(argument) }
-    rescue => e
-      raise DeserializationError.new(e)
+    rescue
+      raise DeserializationError
     end
 
     private
-      GLOBALID_KEY = '_aj_globalid'.freeze
-      private_constant :GLOBALID_KEY
+      # :nodoc:
+      GLOBALID_KEY = "_aj_globalid".freeze
+      # :nodoc:
+      SYMBOL_KEYS_KEY = "_aj_symbol_keys".freeze
+      # :nodoc:
+      WITH_INDIFFERENT_ACCESS_KEY = "_aj_hash_with_indifferent_access".freeze
+      private_constant :GLOBALID_KEY, :SYMBOL_KEYS_KEY, :WITH_INDIFFERENT_ACCESS_KEY
 
       def serialize_argument(argument)
         case argument
         when *TYPE_WHITELIST
           argument
         when GlobalID::Identification
-          { GLOBALID_KEY => argument.to_global_id.to_s }
+          convert_to_global_id_hash(argument)
         when Array
           argument.map { |arg| serialize_argument(arg) }
+        when ActiveSupport::HashWithIndifferentAccess
+          result = serialize_hash(argument)
+          result[WITH_INDIFFERENT_ACCESS_KEY] = serialize_argument(true)
+          result
         when Hash
-          argument.each_with_object({}) do |(key, value), hash|
-            hash[serialize_hash_key(key)] = serialize_argument(value)
-          end
+          symbol_keys = argument.each_key.grep(Symbol).map(&:to_s)
+          result = serialize_hash(argument)
+          result[SYMBOL_KEYS_KEY] = symbol_keys
+          result
         else
           raise SerializationError.new("Unsupported argument type: #{argument.class.name}")
         end
@@ -75,7 +84,7 @@ module ActiveJob
           if serialized_global_id?(argument)
             deserialize_global_id argument
           else
-            deserialize_hash argument
+            deserialize_hash(argument)
           end
         else
           raise ArgumentError, "Can only deserialize primitive arguments: #{argument.inspect}"
@@ -83,20 +92,35 @@ module ActiveJob
       end
 
       def serialized_global_id?(hash)
-        hash.size == 1 and hash.include?(GLOBALID_KEY)
+        hash.size == 1 && hash.include?(GLOBALID_KEY)
       end
 
       def deserialize_global_id(hash)
         GlobalID::Locator.locate hash[GLOBALID_KEY]
       end
 
-      def deserialize_hash(serialized_hash)
-        serialized_hash.each_with_object({}.with_indifferent_access) do |(key, value), hash|
-          hash[key] = deserialize_argument(value)
+      def serialize_hash(argument)
+        argument.each_with_object({}) do |(key, value), hash|
+          hash[serialize_hash_key(key)] = serialize_argument(value)
         end
       end
 
-      RESERVED_KEYS = [GLOBALID_KEY, GLOBALID_KEY.to_sym]
+      def deserialize_hash(serialized_hash)
+        result = serialized_hash.transform_values { |v| deserialize_argument(v) }
+        if result.delete(WITH_INDIFFERENT_ACCESS_KEY)
+          result = result.with_indifferent_access
+        elsif symbol_keys = result.delete(SYMBOL_KEYS_KEY)
+          result = transform_symbol_keys(result, symbol_keys)
+        end
+        result
+      end
+
+      # :nodoc:
+      RESERVED_KEYS = [
+        GLOBALID_KEY, GLOBALID_KEY.to_sym,
+        SYMBOL_KEYS_KEY, SYMBOL_KEYS_KEY.to_sym,
+        WITH_INDIFFERENT_ACCESS_KEY, WITH_INDIFFERENT_ACCESS_KEY.to_sym,
+      ]
       private_constant :RESERVED_KEYS
 
       def serialize_hash_key(key)
@@ -108,6 +132,23 @@ module ActiveJob
         else
           raise SerializationError.new("Only string and symbol hash keys may be serialized as job arguments, but #{key.inspect} is a #{key.class}")
         end
+      end
+
+      def transform_symbol_keys(hash, symbol_keys)
+        hash.transform_keys do |key|
+          if symbol_keys.include?(key)
+            key.to_sym
+          else
+            key
+          end
+        end
+      end
+
+      def convert_to_global_id_hash(argument)
+        { GLOBALID_KEY => argument.to_global_id.to_s }
+      rescue URI::GID::MissingModelIdError
+        raise SerializationError, "Unable to serialize #{argument.class} " \
+          "without an id. (Maybe you forgot to call save?)"
       end
   end
 end

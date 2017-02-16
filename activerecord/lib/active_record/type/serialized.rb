@@ -1,8 +1,7 @@
 module ActiveRecord
   module Type
-    class Serialized < DelegateClass(Type::Value) # :nodoc:
-      include Mutable
-      include Decorator
+    class Serialized < DelegateClass(ActiveModel::Type::Value) # :nodoc:
+      include ActiveModel::Type::Helpers::Mutable
 
       attr_reader :subtype, :coder
 
@@ -12,7 +11,7 @@ module ActiveRecord
         super(subtype)
       end
 
-      def type_cast_from_database(value)
+      def deserialize(value)
         if default_value?(value)
           value
         else
@@ -20,37 +19,45 @@ module ActiveRecord
         end
       end
 
-      def type_cast_for_database(value)
+      def serialize(value)
         return if value.nil?
         unless default_value?(value)
           super coder.dump(value)
         end
       end
 
+      def inspect
+        Kernel.instance_method(:inspect).bind(self).call
+      end
+
       def changed_in_place?(raw_old_value, value)
         return false if value.nil?
-        subtype.changed_in_place?(raw_old_value, type_cast_for_database(value))
+        raw_new_value = encoded(value)
+        raw_old_value.nil? != raw_new_value.nil? ||
+          subtype.changed_in_place?(raw_old_value, raw_new_value)
       end
 
       def accessor
         ActiveRecord::Store::IndifferentHashAccessor
       end
 
-      def init_with(coder)
-        @coder = coder['coder']
-        super
-      end
-
-      def encode_with(coder)
-        coder['coder'] = @coder
-        super
+      def assert_valid_value(value)
+        if coder.respond_to?(:assert_valid_value)
+          coder.assert_valid_value(value, action: "serialize")
+        end
       end
 
       private
 
-      def default_value?(value)
-        value == coder.load(nil)
-      end
+        def default_value?(value)
+          value == coder.load(nil)
+        end
+
+        def encoded(value)
+          unless default_value?(value)
+            coder.dump(value)
+          end
+        end
     end
   end
 end

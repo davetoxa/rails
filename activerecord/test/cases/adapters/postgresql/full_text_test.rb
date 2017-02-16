@@ -1,29 +1,29 @@
-# encoding: utf-8
 require "cases/helper"
-require 'support/schema_dumping_helper'
+require "support/schema_dumping_helper"
 
-class PostgresqlFullTextTest < ActiveRecord::TestCase
+class PostgresqlFullTextTest < ActiveRecord::PostgreSQLTestCase
   include SchemaDumpingHelper
   class Tsvector < ActiveRecord::Base; end
 
   setup do
     @connection = ActiveRecord::Base.connection
-    @connection.create_table('tsvectors') do |t|
-      t.tsvector 'text_vector'
+    @connection.create_table("tsvectors") do |t|
+      t.tsvector "text_vector"
     end
   end
 
   teardown do
-    @connection.execute 'DROP TABLE IF EXISTS tsvectors;'
+    @connection.drop_table "tsvectors", if_exists: true
   end
 
   def test_tsvector_column
     column = Tsvector.columns_hash["text_vector"]
     assert_equal :tsvector, column.type
     assert_equal "tsvector", column.sql_type
-    assert_not column.number?
-    assert_not column.binary?
     assert_not column.array?
+
+    type = Tsvector.type_for_attribute("text_vector")
+    assert_not type.binary?
   end
 
   def test_update_tsvector
